@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	_log "log"
+	"mime"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/bmatcuk/doublestar"
 	"github.com/logrusorgru/aurora"
 	"github.com/mitchellh/go-homedir"
@@ -22,6 +24,7 @@ import (
 )
 
 type tConfig struct {
+	ACL          string
 	Bucket       string
 	CacheControl string
 	Clean        bool
@@ -37,11 +40,17 @@ type tConfig struct {
 	Yes          bool
 }
 
+type tFile struct {
+	Path            string
+	ContentType     *string
+	ContentEncoding *string
+}
+
 type tObject struct {
 	CacheControl    *string
-	ContentEncoding *string
 	ContentType     *string
-	Release         int
+	ContentEncoding *string
+	Metadata        map[string]*string
 }
 
 func init() {
@@ -62,19 +71,20 @@ func main() {
 		}
 	}
 
-	flag.BoolVar(&config.Deploy, "deploy", true, "Deploy new assets")
 	flag.BoolVar(&config.Clean, "clean", true, "Remove old assets")
 	flag.BoolVar(&config.Debug, "debug", false, "Debug logging")
+	flag.BoolVar(&config.Deploy, "deploy", true, "Deploy new assets")
 	flag.BoolVar(&config.DryRun, "dry-run", false, "Dry-run")
 	flag.BoolVar(&config.Force, "force", false, "")
-	flag.BoolVar(&config.Yes, "yes", false, "Do not ask for confirmation")
 	flag.BoolVar(&config.Quiet, "quiet", false, "Do not say what I'm doing")
-	flag.IntVar(&config.Release, "release", defaultRelease, "Release number")
+	flag.BoolVar(&config.Yes, "yes", false, "Do not ask for confirmation")
 	flag.IntVar(&config.Keep, "keep", 10, "Number of releases to keep")
-	flag.StringVar(&config.Pattern, "pattern", "**/*", "Assets to deploy")
-	flag.StringVar(&config.Source, "source", ".", "Source directory")
+	flag.IntVar(&config.Release, "release", defaultRelease, "Release number")
+	flag.StringVar(&config.ACL, "acl", "public-read", "File ACL")
 	flag.StringVar(&config.Bucket, "bucket", "", "S3 Bucket")
 	flag.StringVar(&config.CacheControl, "cache-control", "public,immutable,max-age=31536000", "")
+	flag.StringVar(&config.Pattern, "pattern", "**/*", "Assets to deploy")
+	flag.StringVar(&config.Source, "source", ".", "Source directory")
 	flag.Parse()
 
 	if config.Quiet {
@@ -100,7 +110,7 @@ func main() {
 		log.Fatalf("Error expanding source: %s", err)
 	}
 
-	localFiles := make(map[string]os.FileInfo)
+	localFiles := make(map[string]tFile)
 
 	err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 		if info.IsDir() {
@@ -123,7 +133,27 @@ func main() {
 			return nil
 		}
 
-		localFiles[rel] = info
+		file := tFile{Path: path}
+
+		ext := filepath.Ext(path)
+		switch ext {
+		case ".gz":
+			file.ContentEncoding = aws.String("gzip")
+			ext = filepath.Ext(path[0 : len(path)-3])
+		case ".br":
+			file.ContentEncoding = aws.String("br")
+			ext = filepath.Ext(path[0 : len(path)-3])
+		case ".zz":
+			file.ContentEncoding = aws.String("deflate")
+			ext = filepath.Ext(path[0 : len(path)-3])
+		}
+
+		mime := mime.TypeByExtension(ext)
+		if len(mime) > 0 {
+			file.ContentType = aws.String(mime)
+		}
+
+		localFiles[rel] = file
 		return nil
 	})
 
@@ -141,8 +171,8 @@ func main() {
 		S3ForcePathStyle: aws.Bool(true),
 	}
 
-	s2s := session.New(s3Config)
-	s3c := s3.New(s2s)
+	s3s := session.New(s3Config)
+	s3c := s3.New(s3s)
 
 	remoteFiles := make(map[string]tObject)
 
@@ -154,16 +184,11 @@ func main() {
 				log.Debugf("Skip %s: %v", *item.Key, err)
 			}
 
-			release := 0
-			if val, ok := obj.Metadata["release"]; ok && val != nil {
-				release, _ = strconv.Atoi(*val)
-			}
-
 			remoteFiles[*item.Key] = tObject{
-				Release:         release,
 				CacheControl:    obj.CacheControl,
-				ContentType:     obj.ContentType,
 				ContentEncoding: obj.ContentEncoding,
+				ContentType:     obj.ContentType,
+				Metadata:        obj.Metadata,
 			}
 		}
 
@@ -176,31 +201,87 @@ func main() {
 
 	var allFiles []string
 
-	newFiles := make(map[string]bool)
-	changedFiles := make(map[string]bool)
-	for file := range localFiles {
-		allFiles = append(allFiles, file)
+	newFiles := make(map[string]tFile)
+	differentFiles := make(map[string]tObject)
+	for key, file := range localFiles {
+		allFiles = append(allFiles, key)
 
-		if obj, ok := remoteFiles[file]; ok {
-			needUpdate := config.Force
+		if config.Force {
+			newFiles[key] = file
+			continue
+		}
 
-			if obj.CacheControl != nil {
-				if *obj.CacheControl != config.CacheControl {
-					log.Warnf("%s: Different Cache-Control: %s", file, *obj.CacheControl)
-					needUpdate = true
-				}
-			} else {
-				log.Warnf("%s: Missing Cache-Control", file)
-				needUpdate = true
-			}
+		obj, remoteExists := remoteFiles[key]
 
-			if needUpdate {
-				changedFiles[file] = true
-			} else {
-				log.Debugf("%s: up-to-date", file)
+		if !remoteExists && (config.Deploy || config.DryRun) {
+			newFiles[key] = file
+			continue
+		}
+
+		update := false
+
+		if obj.CacheControl != nil {
+			if *obj.CacheControl != config.CacheControl {
+				log.Warnf("%s: Wrong Cache-Control, expected: %s, got: %s", key, config.CacheControl, *obj.CacheControl)
+				obj.CacheControl = &config.CacheControl
+				update = true
 			}
 		} else {
-			newFiles[file] = true
+			log.Warnf("%s: Missing Cache-Control", key)
+			obj.CacheControl = &config.CacheControl
+			update = true
+		}
+
+		if obj.ContentType != nil {
+			if file.ContentType != nil && *file.ContentType != *obj.ContentType {
+				log.Warnf("%s: Wrong Content-Type, expected %s, got %s", key, *file.ContentType, *obj.ContentType)
+				obj.ContentType = file.ContentType
+				update = true
+			}
+		} else if file.ContentType != nil {
+			log.Warnf("%s: Missing Content-Type: %s", key, *file.ContentType)
+			obj.ContentType = file.ContentType
+			update = true
+		}
+
+		if obj.ContentEncoding != nil {
+			if file.ContentEncoding != nil && *file.ContentEncoding != *obj.ContentEncoding {
+				log.Warnf("%s: Wrong Content-Encoding, expected %s, got %s", key, *file.ContentEncoding, *obj.ContentEncoding)
+				obj.ContentEncoding = file.ContentEncoding
+				update = true
+			}
+		} else if file.ContentEncoding != nil {
+			log.Warnf("%s: Missing Content-Encoding: %s", key, *file.ContentEncoding)
+			obj.ContentEncoding = file.ContentEncoding
+			update = true
+		}
+
+		releaseString := aws.String(strconv.Itoa(config.Release))
+
+		if obj.Metadata == nil {
+			log.Warnf("%s: Missing object metadata", key)
+			obj.Metadata = map[string]*string{"Release": releaseString}
+			update = true
+		} else {
+			val, ok := obj.Metadata["Release"]
+
+			if !ok || val == nil {
+				log.Warnf("%s: Missing release metadata", key)
+				obj.Metadata = map[string]*string{"Release": releaseString}
+				update = true
+			} else if *val != *releaseString {
+				i, _ := strconv.Atoi(*val)
+				if keep(&config, i) {
+					log.Debugf("%s: Update release from %s to %", key, *val, *releaseString)
+					update = true
+				}
+			}
+		}
+
+		if update {
+			differentFiles[key] = obj
+		} else {
+			log.Debugf("%s: up-to-date", key)
 		}
 	}
 
@@ -210,7 +291,15 @@ func main() {
 		if _, ok := localFiles[file]; !ok {
 			allFiles = append(allFiles, file)
 
-			if obj.Release < (config.Release - config.Keep) {
+			release := 0
+			if obj.Metadata != nil {
+				val, _ := obj.Metadata["Release"]
+				if val != nil {
+					release, _ = strconv.Atoi(*val)
+				}
+			}
+
+			if (config.Clean || config.DryRun) && !keep(&config, release) {
 				removeFiles[file] = true
 			} else {
 				keepFiles[file] = true
@@ -222,30 +311,37 @@ func main() {
 
 	if !(config.Quiet && config.Yes) {
 		fmt.Println()
-		fmt.Printf("An execution plan has been generated and is shown below.\n")
-		fmt.Printf("Actions are indicated with the following symbols:\n")
-		fmt.Printf("  %s Upload new file\n", aurora.Green("+"))
-		fmt.Printf("  %s Update remote file in-place\n", aurora.Yellow("~"))
-		fmt.Printf("  %s Delete remote file\n", aurora.Red("-"))
-		fmt.Println()
-		fmt.Printf("Current execution plan:\n")
 
-		for _, file := range allFiles {
-			if _, ok := newFiles[file]; ok {
-				fmt.Printf("  %s %s\n", aurora.Green("+"), file)
+		if len(newFiles) > 0 || len(differentFiles) > 0 || len(removeFiles) > 0 {
+			fmt.Printf("An execution plan has been generated and is shown below.\n")
+			fmt.Printf("Actions are indicated with the following symbols:\n")
+			fmt.Printf("  %s Upload new file\n", aurora.Green("+"))
+			fmt.Printf("  %s Update remote file in-place\n", aurora.Yellow("~"))
+			fmt.Printf("  %s Delete remote file\n", aurora.Red("-"))
+			fmt.Println()
+			fmt.Printf("Current execution plan:\n")
+
+			for _, file := range allFiles {
+				if _, ok := newFiles[file]; ok {
+					fmt.Printf("  %s %s\n", aurora.Green("+"), file)
+				}
+				if _, ok := differentFiles[file]; ok {
+					fmt.Printf("  %s %s\n", aurora.Yellow("~"), file)
+				}
+				if _, ok := removeFiles[file]; ok {
+					fmt.Printf("  %s %s\n", aurora.Red("-"), file)
+				}
+				if _, ok := keepFiles[file]; ok {
+					fmt.Printf("    %s\n", file)
+				}
 			}
-			if _, ok := changedFiles[file]; ok {
-				fmt.Printf("  %s %s\n", aurora.Yellow("~"), file)
-			}
-			if _, ok := removeFiles[file]; ok {
-				fmt.Printf("  %s %s\n", aurora.Red("-"), file)
-			}
-			if _, ok := keepFiles[file]; ok {
-				fmt.Printf("    %s\n", file)
-			}
+			fmt.Println()
+
+		} else {
+			fmt.Println("No changes detected. All files up-to-date.")
+			fmt.Println()
+			os.Exit(0)
 		}
-
-		fmt.Println()
 	}
 
 	if config.DryRun {
@@ -257,9 +353,83 @@ func main() {
 		os.Exit(0)
 	}
 
-	// TODO: Uploading files
-	// TODO: Updating files
-	// TODO: Removing files
+	if len(newFiles) > 0 {
+		log.Infoln("Uploading new files...")
+
+		uploader := s3manager.NewUploader(s3s)
+		for key, file := range newFiles {
+			log.Debugf("Uploading %s...", key)
+
+			fd, err := os.Open(file.Path)
+			if err != nil {
+				log.Errorf("Upload failed: %v", err)
+			}
+			defer fd.Close()
+
+			opts := s3manager.UploadInput{
+				Bucket:          &config.Bucket,
+				Key:             &key,
+				Body:            fd,
+				ACL:             &config.ACL,
+				CacheControl:    &config.CacheControl,
+				ContentType:     file.ContentType,
+				ContentEncoding: file.ContentEncoding,
+				Metadata:        map[string]*string{"Release": aws.String(strconv.Itoa(config.Release))},
+			}
+
+			_, err = uploader.Upload(&opts)
+			if err != nil {
+				log.Errorf("Upload failed: %v", err)
+			}
+		}
+	}
+
+	if len(differentFiles) > 0 {
+		for key, obj := range differentFiles {
+			log.Debugf("Updating in-place: %s", key)
+
+			meta := obj.Metadata
+			if meta != nil {
+				meta["Release"] = aws.String(strconv.Itoa(config.Release))
+			} else {
+				meta = map[string]*string{"Release": aws.String(strconv.Itoa(config.Release))}
+			}
+
+			opts := s3.CopyObjectInput{
+				Bucket:            &config.Bucket,
+				CopySource:        aws.String(fmt.Sprintf("%v/%v", config.Bucket, key)),
+				Key:               &key,
+				ACL:               &config.ACL,
+				CacheControl:      &config.CacheControl,
+				MetadataDirective: aws.String("REPLACE"),
+				Metadata:          meta,
+				ContentEncoding:   obj.ContentEncoding,
+				ContentType:       obj.ContentType,
+			}
+
+			_, err := s3c.CopyObject(&opts)
+			if err != nil {
+				log.Errorf("Updating failed: %v", err)
+			}
+		}
+	}
+
+	if len(removeFiles) > 0 {
+		log.Infoln("Deleting remote files...")
+
+		for key := range removeFiles {
+			log.Debugf("Delete %s...", key)
+
+			_, err := s3c.DeleteObject(&s3.DeleteObjectInput{
+				Bucket: &config.Bucket,
+				Key:    &key,
+			})
+
+			if err != nil {
+				log.Errorf("Delete failed: %v", err)
+			}
+		}
+	}
 }
 
 func confirm(message string) bool {
@@ -275,4 +445,8 @@ func confirm(message string) bool {
 	response = strings.ToLower(strings.TrimSpace(response))
 
 	return response == "y" || response == "yes"
+}
+
+func keep(c *tConfig, i int) bool {
+	return i+c.Keep > c.Release
 }
