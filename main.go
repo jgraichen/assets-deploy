@@ -24,20 +24,23 @@ import (
 )
 
 type tConfig struct {
-	ACL          string
-	Bucket       string
-	CacheControl string
-	Clean        bool
-	Debug        bool
-	Deploy       bool
-	DryRun       bool
-	Force        bool
-	Keep         int
-	Pattern      string
-	Quiet        bool
-	Release      int
-	Source       string
-	Yes          bool
+	ACL            string
+	Bucket         string
+	CacheControl   string
+	Clean          bool
+	Debug          bool
+	Deploy         bool
+	DryRun         bool
+	Endpoint       string
+	Force          bool
+	Keep           int
+	ForcePathStyle bool
+	Pattern        string
+	Quiet          bool
+	Region         string
+	Release        int
+	Source         string
+	Yes            bool
 }
 
 type tFile struct {
@@ -85,6 +88,9 @@ func main() {
 	flag.StringVar(&config.CacheControl, "cache-control", "public,immutable,max-age=31536000", "")
 	flag.StringVar(&config.Pattern, "pattern", "**/*", "Assets to deploy")
 	flag.StringVar(&config.Source, "source", ".", "Source directory")
+	flag.StringVar(&config.Endpoint, "endpoint", "", "S3 endpoint")
+	flag.StringVar(&config.Region, "region", "", "S3 Region")
+	flag.BoolVar(&config.ForcePathStyle, "force-path-style", false, "Force path style access for S3")
 	flag.Parse()
 
 	if config.Quiet {
@@ -104,6 +110,29 @@ func main() {
 	}
 
 	log.Printf("Release: %d\n", config.Release)
+
+	//
+	// Setup S3
+	//
+
+	s3Config := &aws.Config{
+		S3ForcePathStyle: &config.ForcePathStyle,
+	}
+
+	if len(config.Endpoint) > 0 {
+		s3Config.Endpoint = &config.Endpoint
+	}
+
+	if len(config.Region) > 0 {
+		s3Config.Region = &config.Region
+	}
+
+	s3s := session.New(s3Config)
+	s3c := s3.New(s3s)
+
+	//
+	// Scan local files
+	//
 
 	source, err := homedir.Expand(config.Source)
 	if err != nil {
@@ -162,17 +191,12 @@ func main() {
 	}
 
 	log.Infof("Found %d files", len(localFiles))
+
+	//
+	// Scan remote files
+	//
+
 	log.Infof("Reading bucket for existing files...")
-
-	s3Config := &aws.Config{
-		Endpoint:         aws.String("https://s3.xopic.de"),
-		Region:           aws.String("default"),
-		DisableSSL:       aws.Bool(true),
-		S3ForcePathStyle: aws.Bool(true),
-	}
-
-	s3s := session.New(s3Config)
-	s3c := s3.New(s3s)
 
 	remoteFiles := make(map[string]tObject)
 
@@ -198,6 +222,10 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+
+	//
+	// Check for files that are new or need an update
+	//
 
 	var allFiles []string
 
@@ -285,6 +313,10 @@ func main() {
 		}
 	}
 
+	//
+	// Check for files to be removed
+	//
+
 	removeFiles := make(map[string]bool)
 	keepFiles := make(map[string]bool)
 	for file, obj := range remoteFiles {
@@ -306,6 +338,10 @@ func main() {
 			}
 		}
 	}
+
+	//
+	// Print plan and ask for confirmation
+	//
 
 	sort.Strings(allFiles)
 
@@ -352,6 +388,10 @@ func main() {
 		fmt.Println("Abort.")
 		os.Exit(0)
 	}
+
+	//
+	// Upload new files, update remove files and finally cleanup old files
+	//
 
 	if len(newFiles) > 0 {
 		log.Infoln("Uploading new files...")
