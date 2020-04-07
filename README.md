@@ -47,3 +47,5 @@ See all options with `assets-deploy --help`.
 * Release number defaults to `BUILD_NUMBER` environment variable and must be an integer.
 
 * Credentials are read from `~/.aws/credentials` or environment variables.
+
+* Compressed files (`.gz`, `.br`, `.zz`) are uploaded as the uncompressed content type and appropriate Content-Encoding header. They are expected to be fetched by a proxy based on the clients Accept-Encoding header.
