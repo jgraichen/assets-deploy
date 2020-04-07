@@ -1,0 +1,17 @@
+image: golang:1.14
+
+variables:
+  GOARCH: amd64
+
+.build:
+  stage: build
+  script:
+    - go build -v -ldflags="-s -w" -o assets-deploy
+  artifacts:
+    paths:
+      - assets-deploy
+
+linux-amd64:
+  extends: .build
+  variables:
+    GOOS: linux
