@@ -272,7 +272,7 @@ func main() {
 			} else if *val != *releaseString {
 				i, _ := strconv.Atoi(*val)
 				if keep(&config, i) {
-					log.Debugf("%s: Update release from %s to %", key, *val, *releaseString)
+					log.Debugf("%s: Update release from %s to %s", key, *val, *releaseString)
 					update = true
 				}
 			}
