@@ -1,0 +1,90 @@
+# This is an example goreleaser.yaml file with some sane defaults.
+# Make sure to check the documentation at http://goreleaser.com
+
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+dockers:
+  - image_templates:
+      - ghcr.io/jgraichen/assets-deploy:latest-amd64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}-amd64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}.{{ .Minor }}-amd64
+      - ghcr.io/jgraichen/assets-deploy:{{ .Tag }}-amd64
+    use: buildx
+    build_flag_templates:
+      - --pull
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.created={{.Date}}
+      - --label=org.opencontainers.image.title={{.ProjectName}}
+      - --label=org.opencontainers.image.revision={{.FullCommit}}
+      - --label=org.opencontainers.image.version={{.Version}}
+      - --label=org.opencontainers.image.licenses=MIT
+      - --label=org.opencontainers.image.url=https://github.com/jgraichen/assets-deploy
+      - --label=org.opencontainers.image.source=https://github.com/jgraichen/assets-deploy
+  - image_templates:
+      - ghcr.io/jgraichen/assets-deploy:latest-arm64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}-arm64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}.{{ .Minor }}-arm64
+      - ghcr.io/jgraichen/assets-deploy:{{ .Tag }}-arm64
+    use: buildx
+    build_flag_templates:
+      - --pull
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.created={{.Date}}
+      - --label=org.opencontainers.image.title={{.ProjectName}}
+      - --label=org.opencontainers.image.revision={{.FullCommit}}
+      - --label=org.opencontainers.image.version={{.Version}}
+      - --label=org.opencontainers.image.licenses=MIT
+      - --label=org.opencontainers.image.url=https://github.com/jgraichen/assets-deploy
+      - --label=org.opencontainers.image.source=https://github.com/jgraichen/assets-deploy
+    goarch: arm64
+
+docker_manifests:
+  - name_template: ghcr.io/jgraichen/assets-deploy:latest
+    image_templates:
+      - ghcr.io/jgraichen/assets-deploy:latest-amd64
+      - ghcr.io/jgraichen/assets-deploy:latest-arm64
+  - name_template: ghcr.io/jgraichen/assets-deploy:v{{ .Major }}
+    image_templates:
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}-amd64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}-arm64
+  - name_template: ghcr.io/jgraichen/assets-deploy:v{{ .Major }}.{{ .Minor }}
+    image_templates:
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}.{{ .Minor }}-amd64
+      - ghcr.io/jgraichen/assets-deploy:v{{ .Major }}.{{ .Minor }}-arm64
+  - name_template: ghcr.io/jgraichen/assets-deploy:{{ .Tag }}
+    image_templates:
+      - ghcr.io/jgraichen/assets-deploy:{{ .Tag }}-amd64
+      - ghcr.io/jgraichen/assets-deploy:{{ .Tag }}-arm64
+
+checksum:
+  algorithm: sha384
+  name_template: SHA384SUMS
+
+changelog:
+  use: git
+
+  groups:
+    - title: Changes
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+  filters:
+    exclude:
+      - '^Merge pull request'
+
+release:
+  draft: False

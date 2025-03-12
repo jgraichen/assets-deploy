@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+    branches:
+      - '*'
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.14"
+
+      - run: go build -v
+      - run: go test -v
+
+  release-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.14"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          args: release --snapshot

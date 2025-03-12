@@ -13,7 +13,7 @@ Deploy static assets to an S3 bucket.
 
 ## Usage
 
-```
+```console
 > assets-deploy --bucket assets-prod --source public/assets --release 2142 --keep 1
 INFO Release: 7
 INFO Found 3 files
@@ -49,3 +49,7 @@ See all options with `assets-deploy --help`.
 * Credentials are read from `~/.aws/credentials` or environment variables.
 
 * Compressed files (`.gz`, `.br`, `.zz`) are uploaded as the uncompressed content type and appropriate Content-Encoding header. They are expected to be fetched by a proxy based on the clients Accept-Encoding header.
+
+## License
+
+MIT
