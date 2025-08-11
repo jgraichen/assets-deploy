@@ -1,6 +1,6 @@
 module dev.xikolo.de/gitlab/adm/assets-deploy
 
-go 1.24.5
+go 1.24.6
 
 require (
 	github.com/aws/aws-sdk-go v1.55.8
