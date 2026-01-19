@@ -7,7 +7,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.9.2
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mitchellh/go-homedir v1.1.0
-	github.com/sirupsen/logrus v1.9.3
+	github.com/sirupsen/logrus v1.9.4
 )
 
 require (
